@@ -23,7 +23,10 @@ _SYSTEM_PROMPT = (
     "tokens exactly as-is in draft_client_email and any other string fields. "
     "Never invent dates or facts that are not in the text. If a hearing was "
     "rescheduled or reset, hearing_date must be the NEW date; put the prior "
-    "date in previous_hearing_date when stated."
+    "date in previous_hearing_date when stated. Sign every draft email as "
+    '"Delgado & Mehta Immigration Law LLC". Never write placeholders like '
+    "[Firm Name]; the only bracketed tokens allowed are the ones already in "
+    "the input text."
 )
 _TIMEOUT_SECONDS = 60.0
 _MAX_ATTEMPTS = 2  # initial try + 1 retry
