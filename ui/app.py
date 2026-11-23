@@ -31,20 +31,46 @@ def _hidden_count(counts: dict[str, int] | None) -> int:
     return sum(counts.values())
 
 
-def _call_extract(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
+def _client() -> httpx.Client:
     if not API_KEY:
         raise RuntimeError("GATEWAY_API_KEY is not set in the environment.")
-    with httpx.Client(base_url=BACKEND_URL, timeout=120.0) as client:
+    return httpx.Client(
+        base_url=BACKEND_URL,
+        headers={"X-API-Key": API_KEY},
+        timeout=120.0,
+    )
+
+
+def _call_extract(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
+    with _client() as client:
         response = client.post(
             "/extract",
-            headers={"X-API-Key": API_KEY},
             files={"file": (filename, pdf_bytes, "application/pdf")},
         )
     if response.status_code == 401:
         raise RuntimeError("Unauthorized — check GATEWAY_API_KEY.")
     if response.status_code >= 400:
-        detail = response.json().get("detail", response.text) if response.headers.get("content-type", "").startswith("application/json") else response.text
+        detail = (
+            response.json().get("detail", response.text)
+            if response.headers.get("content-type", "").startswith("application/json")
+            else response.text
+        )
         raise RuntimeError(f"Extract failed ({response.status_code}): {detail}")
+    return response.json()
+
+
+def _call_approve(payload: dict[str, Any]) -> dict[str, Any]:
+    with _client() as client:
+        response = client.post("/approve-and-sync", json=payload)
+    if response.status_code == 401:
+        raise RuntimeError("Unauthorized — check GATEWAY_API_KEY.")
+    if response.status_code >= 400:
+        detail = (
+            response.json().get("detail", response.text)
+            if response.headers.get("content-type", "").startswith("application/json")
+            else response.text
+        )
+        raise RuntimeError(str(detail))
     return response.json()
 
 
@@ -52,6 +78,8 @@ if "extract_result" not in st.session_state:
     st.session_state.extract_result = None
 if "reviewer" not in st.session_state:
     st.session_state.reviewer = ""
+if "sync_result" not in st.session_state:
+    st.session_state.sync_result = None
 
 uploaded = st.file_uploader("Upload one PDF notice", type=["pdf"])
 
@@ -60,8 +88,10 @@ if uploaded is not None and st.button("Extract", type="primary"):
         try:
             result = _call_extract(uploaded.getvalue(), uploaded.name)
             st.session_state.extract_result = result
+            st.session_state.sync_result = None
         except Exception as exc:
             st.session_state.extract_result = None
+            st.session_state.sync_result = None
             st.error(str(exc))
 
 result = st.session_state.extract_result
@@ -175,24 +205,51 @@ reviewer = st.text_input(
 )
 st.session_state.reviewer = reviewer
 
-# Keep edited values in session for Step 14 wiring
-st.session_state.edited = {
+edited_extraction = {
+    **extraction,
     "matter_type": matter_type,
     "hearing_date": hearing_date.isoformat() if hearing_date else None,
     "hearing_type": hearing_type or None,
     "filing_deadline": filing_deadline.isoformat() if filing_deadline else None,
     "is_detained": is_detained,
-    "missing_docs": [line.strip() for line in missing_docs_text.splitlines() if line.strip()],
+    "missing_docs": [
+        line.strip() for line in missing_docs_text.splitlines() if line.strip()
+    ],
+    "draft_client_email": draft_client_email,
+}
+edited_deadline = {
     "task_due_date": task_due_date.isoformat() if task_due_date else None,
     "urgency": urgency_edit,
-    "draft_client_email": draft_client_email,
-    "reviewer": reviewer,
     "flags": flags,
 }
 
-st.button(
-    "Approve & Sync to HubSpot",
-    disabled=True,
-    help="Wired in Step 14",
-)
-st.caption("Approve & Sync is disabled for now — wired in Step 14.")
+if st.button("Approve & Sync to HubSpot", type="primary"):
+    if not reviewer.strip():
+        st.error("Enter a reviewer name before approving.")
+    else:
+        with st.spinner("Syncing to HubSpot…"):
+            try:
+                sync = _call_approve(
+                    {
+                        "review_id": result["review_id"],
+                        "reviewer": reviewer.strip(),
+                        "extraction": edited_extraction,
+                        "deadline": edited_deadline,
+                    }
+                )
+                st.session_state.sync_result = sync
+            except Exception as exc:
+                st.session_state.sync_result = None
+                st.error(str(exc))
+
+sync_result = st.session_state.sync_result
+if sync_result:
+    st.success(
+        "Synced to HubSpot.\n\n"
+        f"- Contact: `{sync_result.get('hubspot_contact_id')}`\n"
+        f"- Deal: `{sync_result.get('hubspot_deal_id')}`\n"
+        f"- Task: `{sync_result.get('hubspot_task_id')}`\n"
+        f"- Note: `{sync_result.get('hubspot_note_id')}`\n"
+        f"- Audit: `{sync_result.get('audit_id')}`\n\n"
+        "Draft email saved to HubSpot as a note. Nothing was sent to the client."
+    )
